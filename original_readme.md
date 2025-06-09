@@ -1,11 +1,3 @@
-## Setup Environment
-1. Install [Miniconda](https://docs.conda.io/en/latest/miniconda.html) if not already installed.
-2. Create and activate the environment:
-   ```bash
-   conda env create -f environment.yml
-   conda activate bao
-   ```
-
 ![Bao loves PostgreSQL](https://github.com/LearnedSystems/BaoForPostgreSQL/blob/master/branding/bao_loves_pg.svg)
 
 This is a prototype implementation of Bao for PostgreSQL. Bao is a learned query optimizer that learns to "steer" the PostgreSQL optimizer by issuing coarse-grained query hints. For more information about Bao, [check out the paper](https://rm.cab/bao).
