@@ -201,6 +201,12 @@ static void set_arm_options(int arm) {
     enable_indexonlyscan = true; 
     enable_nestloop = true; 
     break;
+  case 26: 
+    enable_indexonlyscan = true; 
+    enable_indexscan = true; 
+    enable_mergejoin = true; 
+    enable_seqscan = true; 
+    break;
   default:
     elog(ERROR, "Invalid arm index %d selected.", arm);
     break;

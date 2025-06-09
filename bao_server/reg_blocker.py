@@ -51,7 +51,7 @@ def _arm_idx_to_hints(arm_idx):
     else:
         raise BaoException("RegBlocker only supports the first 5 arms")
     return hints
-        
+
 class ExperimentRunner:
     def __init__(self):
         config = read_config()
@@ -140,7 +140,7 @@ class ExperimentRunner:
                 c.execute(f"SET statement_timeout TO {statement_timeout}")
                 for stmt in _arm_idx_to_hints(arm_idx):
                     c.execute(stmt)
-                
+
                 # get the Bao plan JSON so we can record a timeout if there is one
                 c.execute("EXPLAIN (FORMAT JSON) " + sql)
                 explain_json = c.fetchall()[0][0]
@@ -243,8 +243,8 @@ def should_replace_model(old_model, new_model):
 
 
 if __name__ == "__main__":
+    # import model_lightning as model
     import model
-    
     # Add Q1 and Q2 as sample queries.
     tmp = ExperimentRunner()
 

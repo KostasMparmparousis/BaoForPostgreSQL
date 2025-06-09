@@ -12,6 +12,8 @@ import math
 import reg_blocker
 from constants import (PG_OPTIMIZER_INDEX, DEFAULT_MODEL_PATH,
                        OLD_MODEL_PATH, TMP_MODEL_PATH)
+import argparse
+import faiss
 
 def add_buffer_info_to_plans(buffer_info, plans):
     for p in plans:
@@ -19,8 +21,32 @@ def add_buffer_info_to_plans(buffer_info, plans):
     return plans
 
 class BaoModel:
-    def __init__(self):
+    def __init__(self, log_performance=False, log_file_path="performance_log.txt"):
         self.__current_model = None
+        self.log_performance = log_performance  # New parameter to control logging
+        self.log_file_path = log_file_path  # Where to save the logs
+        if self.log_performance:
+            open(log_file_path, "w").close()
+        self.embeddings_dir = "plan_embeddings"  # Directory to save plan embeddings
+        os.makedirs(self.embeddings_dir, exist_ok=True)
+        self.query_count = 0  # Counter to track the number of queries
+
+    def log_performance_to_file(self, predicted_latency, inference_time):
+        """Logs the best predicted latency and inference time to a file with the query count if enabled."""
+        if self.log_performance:
+            with open(self.log_file_path, "a") as log_file:
+                log_file.write(f"{time.time()} - Query #{self.query_count} - Best Predicted Latency: {predicted_latency} - Inference Time: {inference_time}\n")
+
+    def store_best_plan(self, query_num, plan_data):
+        """Save individual plan data to a JSON file"""
+        filename = f"query_{query_num}_embedding.json"
+        filepath = os.path.join(self.embeddings_dir, filename)
+        
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(plan_data, f, indent=2)
+        except Exception as e:
+            print(f"Failed to save plan embedding for query {query_num}: {str(e)}")
 
     def select_plan(self, messages):
         start = time.time()
@@ -29,17 +55,44 @@ class BaoModel:
 
         # if we don't have a model, default to the PG optimizer
         if self.__current_model is None:
+            print("No model loaded, defaulting to PG optimizer.")
             return PG_OPTIMIZER_INDEX
 
         # if we do have a model, make predictions for each plan.
         arms = add_buffer_info_to_plans(buffers, arms)
         res = self.__current_model.predict(arms)
         idx = res.argmin()
+
+        # Force index 3 which is the hash join plan
+        # idx = 3
+        # Force index 20 which is the nested loop plan
+        # idx = 20
+        # Force index 26 which is the merge join plan
+        # idx = 26        
+        
+        best_latency = res[idx][0]
         stop = time.time()
+        inference_time = stop - start
+        best_plan = arms[idx]
+        if self.log_performance:
+            self.log_performance_to_file(best_latency, inference_time)
+            if hasattr(self.__current_model, 'get_plan_embedding'):
+                try:
+                    embedding = self.__current_model.get_plan_embedding(best_plan)
+                    self.store_best_plan(self.query_count, {
+                        'embedding': embedding,
+                        'plan': best_plan,
+                        'predicted_latency': best_latency,
+                        'inference_time': inference_time,
+                        'timestamp': time.time()
+                    })
+                except Exception as e:
+                    print(f"Failed to extract embedding: {str(e)}")
+        self.query_count += 1
         print("Selected index", idx,
-              "after", f"{round((stop - start) * 1000)}ms",
-              "Predicted reward / PG:", res[idx][0],
-              "/", res[0][0])
+            "after", f"{round((stop - start) * 1000)}ms",
+            "Predicted reward / PG:", res[idx][0],
+            "/", res[0][0], flush=True) 
         return idx
 
     def predict(self, messages):
@@ -56,6 +109,8 @@ class BaoModel:
         return res[0][0]
     
     def load_model(self, fp):
+        # import model_lightning as model
+        import model
         try:
             new_model = model.BaoRegression(have_cache_data=True)
             new_model.load(fp)
@@ -66,7 +121,7 @@ class BaoModel:
                 self.__current_model = new_model
                 print("Accepted new model.")
             else:
-                print("Rejecting load of new model due to regresison profile.")
+                print("Rejecting load of new model due to regression profile.")
                 
         except Exception as e:
             print("Failed to load Bao model from", fp,
@@ -97,9 +152,40 @@ class JSONTCPHandler(socketserver.BaseRequestHandler):
 
 class BaoJSONHandler(JSONTCPHandler):
     def setup(self):
+        super().setup()
+        self.embedding_dim = 64
+        self.faiss_index = None
+        self.embeddings = []
+        self.init_faiss()
         self.__messages = []
+
+    def init_faiss(self):
+        """Initialize or load FAISS index"""
+        self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+        if os.path.exists("plan_embeddings.faiss"):
+            self.faiss_index = faiss.read_index("plan_embeddings.faiss")
+
+    def save_faiss_index(self):
+        """Save FAISS index to disk"""
+        if self.faiss_index is not None:
+            faiss.write_index(self.faiss_index, "plan_embeddings.faiss")
     
     def handle_json(self, data):
+        activation = {}
+
+        def getActivation(name):
+            def hook(model, input, output):
+                activation[name] = output[0].detach().cpu().numpy()  # Convert to numpy
+            return hook
+
+        # Register hook only if model exists
+        if (self.server.bao_model._BaoModel__current_model is not None and
+            hasattr(self.server.bao_model._BaoModel__current_model, '_BaoRegression__net')):
+            h = self.server.bao_model._BaoModel__current_model._BaoRegression__net.tree_conv[8].register_forward_hook(
+                getActivation('TreeLayerNorm'))
+        else:
+            h = None
+
         if "final" in data:
             message_type = self.__messages[0]["type"]
             self.__messages = self.__messages[1:]
@@ -110,6 +196,15 @@ class BaoJSONHandler(JSONTCPHandler):
                 self.request.close()
             elif message_type == "predict":
                 result = self.server.bao_model.predict(self.__messages)
+
+                if 'TreeLayerNorm' in activation:
+                    # Save the embedding to FAISS index
+                    embedding = activation['TreeLayerNorm']
+                    self.embeddings.append(embedding)
+                    if self.faiss_index is not None:
+                        self.faiss_index.add(embedding.reshape(1, -1).astype('float32'))
+                        self.save_faiss_index()
+
                 self.request.sendall(struct.pack("d", result))
                 self.request.close()
             elif message_type == "reward":
@@ -118,6 +213,7 @@ class BaoJSONHandler(JSONTCPHandler):
                 storage.record_reward(plan, obs_reward["reward"], obs_reward["pid"])
             elif message_type == "load model":
                 path = self.__messages[0]["path"]
+                print("Loading model from", path)
                 self.server.bao_model.load_model(path)
             else:
                 print("Unknown message type:", message_type)
@@ -128,8 +224,8 @@ class BaoJSONHandler(JSONTCPHandler):
         return False
                 
 
-def start_server(listen_on, port):
-    model = BaoModel()
+def start_server(listen_on, port, log_performance=False, log_file_path="performance_log.txt"):
+    model = BaoModel(log_performance=log_performance, log_file_path=log_file_path)
 
     if os.path.exists(DEFAULT_MODEL_PATH):
         print("Loading existing model")
@@ -144,6 +240,15 @@ def start_server(listen_on, port):
 if __name__ == "__main__":
     from multiprocessing import Process
     from config import read_config
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True)    
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run the BaoServer with an option to log performance metrics.")
+    parser.add_argument('--log-performance', action='store_true', help="Enable logging of the best predicted latency and inference time.")
+    parser.add_argument('--log-file-path', type=str, default="performance_log.txt", help="File path to save the performance log.")
+    
+    args = parser.parse_args()
 
     config = read_config()
     port = int(config["Port"])
@@ -151,7 +256,7 @@ if __name__ == "__main__":
 
     print(f"Listening on {listen_on} port {port}")
     
-    server = Process(target=start_server, args=[listen_on, port])
+    server = Process(target=start_server, args=[listen_on, port, args.log_performance, args.log_file_path])
     
     print("Spawning server process...")
     server.start()
