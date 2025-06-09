@@ -6,6 +6,45 @@
    conda activate bao
    ```
 
+## Training Guide
+
+1. Start the Bao server:
+   ```bash
+   cd bao_server && python3 main.py
+   ```
+
+2. In another terminal, configure the model checkpoint path in `train.py` (line 39):
+   ```python
+   model_dir = "/your/path/here"  # Update this path to where you wish for the checkpoints to be saved
+   ```
+
+3. Run the training script:
+   ```bash
+   python3 train.py --query_dir queries/job__base_query_split_1/train \
+                   --output_file train__bao__base_query_split_1.txt
+   ```
+
+## Testing guide
+
+1. Start the Bao server:
+   ```bash
+   cd bao_server && python3 main.py
+   ```
+
+2. In another terminal, configure the model checkpoint path in `test_run.py` (line 139):
+   ```python
+   FINAL_MODEL_DIR = "/your/path/here"  # Update this path to load your checkpoint
+   ```
+
+3. Run the testing script:
+   ```bash
+   python3 test_run.py \
+       /path/to/workload/experiment1/job/run1/ \
+       test_output.txt \
+       imdbload
+   ```
+---
+
 ![Bao loves PostgreSQL](https://github.com/LearnedSystems/BaoForPostgreSQL/blob/master/branding/bao_loves_pg.svg)
 
 This is a prototype implementation of Bao for PostgreSQL. Bao is a learned query optimizer that learns to "steer" the PostgreSQL optimizer by issuing coarse-grained query hints. For more information about Bao, [check out the paper](https://rm.cab/bao).
