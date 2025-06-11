@@ -36,7 +36,7 @@ def kill_bao_server():
 def save_final_model_and_history(db_name):
     """Save the final trained model and all history, then clean original repo"""
     # Configuration
-    model_dir = f"/data/hdd1/users/kmparmp/models/bao/{db_name}/final_model"
+    model_dir = f"../../models/experiment5/5.1/complexity_generalization/BAO/final_model"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs(model_dir, exist_ok=True)
 
@@ -132,7 +132,7 @@ Original repository has been cleaned.
 
 def save_model_checkpoint(c_idx, db_name):
     """Save Bao model checkpoint after retraining iteration"""
-    checkpoint_dir = f"/data/hdd1/users/kmparmp/models/bao/{db_name}/checkpoints"
+    checkpoint_dir = f"../../models/experiment5/5.1/complexity_generalization/BAO/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
