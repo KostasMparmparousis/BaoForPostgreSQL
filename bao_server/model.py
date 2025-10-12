@@ -11,6 +11,9 @@ from torch.utils.data import DataLoader
 import net
 from featurize import TreeFeaturizer
 
+SERVER_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOSS_FILE_PATH = os.path.join(SERVER_SCRIPT_DIR, "last_training_loss.txt")
+
 CUDA = torch.cuda.is_available()
 
 def _nn_path(base):
@@ -181,6 +184,16 @@ class BaoRegression:
             self.__fit_losses = losses
         else:
             self.__log("Stopped training after max epochs")
+
+        ### MODIFICATION: Write the final loss to the communication file
+        # This code goes at the very end of the fit() method.
+        try:
+            # The final loss is the last recorded loss from the training loop
+            final_loss = losses[-1] if losses else -1.0
+            with open(LOSS_FILE_PATH, "w") as f:
+                f.write(str(final_loss))
+        except Exception as e:
+            print(f"ERROR: Could not write final loss to {LOSS_FILE_PATH}. Error: {e}")
 
     def predict(self, X):
         if not isinstance(X, list):

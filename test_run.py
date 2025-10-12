@@ -1,3 +1,6 @@
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
+from sqlalchemy import text
 import os
 import time
 import psycopg2
@@ -12,98 +15,136 @@ import json
 
 # Database connection string
 TIMEOUT_LIMIT = 3 * 60 * 1000
-NUM_EXECUTIONS = 1
+NUM_EXECUTIONS = 3
+engine = None
 
 def current_timestamp_str():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-def pg_connection_string(db_name):
-    return f"dbname={db_name} user=suite_user host=train.darelab.athenarc.gr port=5468 password=71Vgfi4mUNPm"
+def get_alchemy_engine(db_name):
+    """Create SQLAlchemy engine with connection pooling"""
+    global engine
+    if engine is None:
+        db_url = f"postgresql://suite_user:71Vgfi4mUNPm@train.darelab.athenarc.gr:5469/{db_name}"
+        engine = create_engine(
+            db_url,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            pool_pre_ping=True
+        )
+    return engine
 
 def run_query(sql, db_name, bao_select=True, bao_reward=True, use_bao=True):
-    measurements = []    
-    while True:
-        try:
-            conn = psycopg2.connect(pg_connection_string(db_name=db_name))
-            cur = conn.cursor()
-            cur.execute(f"SET enable_bao TO {bao_select or bao_reward}")
-            cur.execute(f"SET bao_host = '195.251.63.231'")
-            cur.execute(f"SET bao_port = 9381")
-            cur.execute(f"SET enable_bao_selection TO {bao_select}")
-            cur.execute(f"SET enable_bao_rewards TO {bao_reward}")
-            cur.execute("SET bao_num_arms TO 5")
-            cur.execute("SET statement_timeout TO 300000")
-
-            for i in range(NUM_EXECUTIONS):
-                cur.execute(f"EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) {sql}")
-                plan_list = cur.fetchall()
-                result = plan_list[0][0]
-                # we are explicitly interested in execution *plus* planning time for testing
-
-                bao_hint = result[0]['Bao']['Bao recommended hint'] if use_bao else None
-                measurements.append({
-                    'execution_time': result[-1]['Execution Time'],
-                    'planning_time': result[-1]['Planning Time'],
-                    'hint': bao_hint,
-                    'execution_plan': result
-                })
-                print(f"\t{i}: Execution Time: {measurements[-1]['execution_time']:.4f}\tPlanning Time: {measurements[-1]['planning_time']:.4f}")
-                
-            conn.close()
-
-        except Exception as e:
-            print("An unexpected exception OR timeout occured during database querying:", e)
-            conn.close()
+    measurements = []
+    global engine
+    if engine is None:
+        print("Creating a new SQLAlchemy engine")
+        engine = get_alchemy_engine(db_name)
+    
+    try:
+        with engine.connect() as conn:
+            # Set all parameters in a single execute
+            # SET enable_bao TO {'on' if bao_select or bao_reward else 'off'};
+            conn.execute(text(f"""
+                SET enable_bao TO {'on' if bao_select or bao_reward else 'off'};
+                SET bao_host = '195.251.63.231';
+                SET bao_port = 9381;
+                SET enable_bao_selection TO {'on' if bao_select else 'off'};
+                SET enable_bao_rewards TO {'on' if bao_reward else 'off'};
+                SET bao_num_arms TO 5;
+                SET statement_timeout TO 180000; -- 3 Minutes
+            """))
             
-            tmp = []
-            for _ in range(NUM_EXECUTIONS):
-                tmp.append({
-                    'execution_time': 2 * TIMEOUT_LIMIT,
-                    'planning_time': 2 * TIMEOUT_LIMIT,
-                    'hint': None
-                })
-            return tmp
+            for i in range(NUM_EXECUTIONS):
+                result = conn.execute(
+                    text(f"EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) {sql}")
+                ).fetchone()
+                
+                if result:
+                    plan = result[0]
+                    bao_hint = plan[0]['Bao']['Bao recommended hint'] if use_bao else None
+                    measurements.append({
+                        'execution_time': plan[-1]['Execution Time'],
+                        'planning_time': plan[-1]['Planning Time'],
+                        'hint': bao_hint,
+                        'execution_plan': plan
+                    })
+                    print(f"\t{i}: Execution Time: {measurements[-1]['execution_time']:.4f}\tPlanning Time: {measurements[-1]['planning_time']:.4f}")
 
-        return measurements
+    except Exception as e:
+        print("An unexpected exception OR timeout occurred during database querying:", e)
+        for _ in range(NUM_EXECUTIONS):
+            measurements.append({
+                'execution_time': 2 * TIMEOUT_LIMIT,
+                'planning_time': 2 * TIMEOUT_LIMIT,
+                'hint': None,
+                'execution_plan': None
+            })
+    
+    return measurements
 
-def fetch_queries(directory_path, query_order_file=None):
-    queries= []
+from tqdm import tqdm
+
+def fetch_queries(directory_path, query_order_file=None, skip_bao_processed=False):
+    queries = []
     if query_order_file:
         # Read the query order from the specified file
         with open(query_order_file, 'r') as f:
             query_order = [line.strip() for line in f.readlines()]
-        for filename in query_order:
+        
+        for filename in tqdm(query_order, desc="Processing ordered queries"):
             if not filename.endswith('.sql'):
                 print(f"Warning: {filename} is not a .sql file. Skipping.")
                 continue
             fileId = filename.split(".")[0]
-            file_path = os.path.join(directory_path, fileId, filename)
+            file_path = os.path.join(directory_path, fileId, filename)  # Moved here to fix reference
+            
+            if skip_bao_processed:
+                query_dir = os.path.dirname(file_path)
+                bao_dir = os.path.join(query_dir, "BAO")
+                if os.path.exists(bao_dir):
+                    print(f"Skipping {filename} as BAO directory already exists")
+                    continue
+            
             if os.path.isfile(file_path):
                 with open(file_path, 'r') as sql_file:
                     sql_query = sql_file.read()
-                yield sql_query
+                yield (file_path, filename, sql_query)
+                queries.append((file_path, filename, sql_query))
             else:
                 print(f"Warning: {file_path} does not exist. Skipping.")
-            queries.append((file_path, filename, sql_query))
     else:
         print("No query order file provided. Executing all queries in the directory.")
+        all_query_paths = []
         for root, dirs, files in os.walk(directory_path):
             pattern = os.path.join(root, "*.sql")
-            query_paths = sorted(glob.glob(pattern))
-            for query_path in query_paths:
-                fileId = os.path.basename(query_path).split(".")[0]
-                if os.path.isfile(query_path):
-                    with open(query_path, 'r') as sql_file:
-                        sql_query = sql_file.read()
-                    yield (query_path, os.path.basename(query_path), sql_query)  # Yield the tuple
-                    queries.append((query_path, os.path.basename(query_path), sql_query))
-                else:
-                    print(f"Warning: {query_path} does not exist. Skipping.")
+            all_query_paths.extend(sorted(glob.glob(pattern)))
+        
+        for query_path in tqdm(all_query_paths, desc="Processing unordered queries"):
+            fileId = os.path.basename(query_path).split(".")[0]
+            if skip_bao_processed:
+                query_dir = os.path.dirname(query_path)
+                bao_dir = os.path.join(query_dir, "BAO")
+                if os.path.exists(bao_dir):
+                    print(f"Skipping {os.path.basename(query_path)} as BAO directory already exists")
+                    continue
+            
+            if os.path.isfile(query_path):
+                with open(query_path, 'r') as sql_file:
+                    sql_query = sql_file.read()
+                yield (query_path, os.path.basename(query_path), sql_query)
+                queries.append((query_path, os.path.basename(query_path), sql_query))
+            else:
+                print(f"Warning: {query_path} does not exist. Skipping.")
+    
     return queries
 
-def execute_queries_in_directory(directory_path, db_name, output_file_path, query_order_file=None):
-    queries = fetch_queries(directory_path, query_order_file)
-    for filePath, filename, sql_query in queries:
+def execute_queries_in_directory(directory_path, db_name, output_file_path, query_order_file=None, skip_bao_processed=False):
+    queries = fetch_queries(directory_path, query_order_file, skip_bao_processed)
+    # print(f"Found {len(list(queries))} queries to execute in {directory_path}")
+    for filePath, filename, sql_query in tqdm(queries, desc="Executing queries", unit="query"):
         print(f"Executing query from file: {filename}")
         use_bao = True
         # Call run_query with the SQL from the file (can set bao_select or bao_reward flags as needed)
@@ -111,6 +152,9 @@ def execute_queries_in_directory(directory_path, db_name, output_file_path, quer
 
         count = 1        
         for measurement in measurements:
+            if measurement['execution_plan'] is None:
+                print(f"Warning: Execution plan for {filename} is None. Skipping saving plan.")
+                continue
             # Print the best measurement
             output_string = f"{'x' if measurement['hint'] is None else measurement['hint']}, {current_timestamp_str()}, {filename}, {measurement['planning_time']}, {measurement['execution_time']}, {'Bao' if use_bao else 'PG'}"
             print(output_string)
@@ -122,10 +166,15 @@ def execute_queries_in_directory(directory_path, db_name, output_file_path, quer
             query_dir = os.path.dirname(filePath) 
             # Save the execution plan to a file in a bao directory where the query came from
             bao_dir = os.path.join(query_dir, "BAO")
-            run_dir = os.path.join(bao_dir, "run" + str(count))
-            os.makedirs(run_dir, exist_ok=True)
             
-            plan_file_path = os.path.join(run_dir ,filename.replace('.sql', '_bao_plan.json'))
+            if NUM_EXECUTIONS > 1:
+                run_dir = os.path.join(bao_dir, "run" + str(count))
+                os.makedirs(run_dir, exist_ok=True)
+                plan_file_path = os.path.join(run_dir ,filename.replace('.sql', '_bao_plan.json'))
+            else:
+                os.makedirs(bao_dir, exist_ok=True)
+                plan_file_path = os.path.join(bao_dir, filename.replace('.sql', '_bao_plan.json'))
+
             os.makedirs(os.path.dirname(plan_file_path), exist_ok=True)
             with open(plan_file_path, 'w') as plan_file:
                 json.dump(measurement['execution_plan'], plan_file, indent=4)
@@ -136,7 +185,7 @@ import os
 
 import shutil
 import subprocess
-FINAL_MODEL_DIR = "/data/hdd1/users/kmparmp/experiment2/job/train/random/models/bao/random/final_model/20250520_141757_bao_default_model"
+FINAL_MODEL_DIR = "/data/hdd1/users/kmparmp/Learned-Optimizers-Benchmarking-Suite/models/experiment2/random_split/BAO/random/final_model/20250520_141757_bao_default_model"
 
 def kill_bao_server():
     """Terminate bao_server/main.py using pkill"""
@@ -211,7 +260,7 @@ def fetch_final_model():
 
 def load_model():
     """Instruct the BAO server to load the specified model"""
-    model_path = os.path.join("/data/hdd1/users/kmparmp/BaoForPostgreSQL/bao_server", "bao_default_model")
+    model_path = os.path.join("/data/hdd1/users/kmparmp/Learned-Optimizers-Benchmarking-Suite/optimizers/BaoForPostgreSQL/bao_server", "bao_default_model")
     print(f"Loading model from {model_path}")
     cmd = f"cd bao_server && python3 baoctl.py --load {model_path}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -251,10 +300,11 @@ def start_bao_server():
         return False
 
 
-def main(workload_directory_path, db_name, output_file_path, query_order):
+def main(workload_directory_path, db_name, output_file_path, query_order, skip_bao_processed):
     # Fetch the final model and load it
     fetch_final_model()
     # start_bao_server()
+    engine = get_alchemy_engine(db_name)  # This will use the global engine variable
 
     # Explicitly load the final model
     if not load_model():
@@ -263,7 +313,7 @@ def main(workload_directory_path, db_name, output_file_path, query_order):
         return
         
     # Execute queries and get the path to the actual latencies file
-    execute_queries_in_directory(workload_directory_path, db_name, output_file_path, query_order)
+    execute_queries_in_directory(workload_directory_path, db_name, output_file_path, query_order, skip_bao_processed)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Execute SQL queries from files in a directory, record latencies, and calculate Q-error.")
@@ -271,15 +321,17 @@ if __name__ == "__main__":
     parser.add_argument("output_file", type=str, default="test_output.txt", help="Path to the output file")
     parser.add_argument("db_name", type=str, default="imdbload", help="Postgres Database name")
     parser.add_argument('--query_order_file', type=str, help='Text file specifying the order of query files to execute')
+    parser.add_argument('--skip_bao_processed', action='store_true', help='Skip queries that already have a BAO directory')
     
     args = parser.parse_args()
     workload_directory_path = args.workload_directory
     db_name = args.db_name
     output_file_path = args.output_file
     query_order = args.query_order_file
+    skip_bao_processed = args.skip_bao_processed
     
     # Ensure the provided directory exists
     if not os.path.isdir(workload_directory_path):
         print(f"Error: The directory {workload_directory_path} does not exist.")
     else:
-        main(workload_directory_path, db_name, output_file_path, query_order)
+        main(workload_directory_path, db_name, output_file_path, query_order, skip_bao_processed)
