@@ -66,8 +66,8 @@ python3 train.py --query_dir <path/to/train/queries/> \
 FINAL_MODEL_DIR = "/path/to/load/checkpoints/"
 ```
    - `<path/to/test/queries/>`: (Positional) Path to the directory with test queries.
-   - <path/to/results.txt>: (Positional) Path to save the output results.
-   - <database_name>: (Positional) The name of the database to connect to (e.g., imdbload).
+   - `<path/to/results.txt>`: (Positional) Path to save the output results.
+   - `<database_name>`: (Positional) The name of the database to connect to (e.g., imdbload).
 
 ---
 
