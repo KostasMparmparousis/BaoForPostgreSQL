@@ -1,99 +1,95 @@
-## Setup Environment
-1. Install [Miniconda](https://docs.conda.io/en/latest/miniconda.html) if not already installed.
-2. Create and activate the environment:
-   ```bash
-   conda env create -f environment.yml
-   conda activate bao
-   ```
+# BAO: The Bandit Optimizer
 
-## Training Guide
+This directory contains the implementation of Bao, a learned query optimizer that "steers" the PostgreSQL optimizer using hints. For more technical details, please refer to the [original paper](https://rm.cab/bao).
 
-1. Start the Bao server:
-   ```bash
-   cd bao_server && python3 main.py
-   ```
+This guide provides instructions for using Bao within the evaluation suite.
 
-2. In another terminal, configure the model checkpoint path in `train.py` (line 39):
-   ```python
-   model_dir = "/your/path/here"  # Update this path to where you wish for the checkpoints to be saved
-   ```
+### Prerequisites
 
-3. Run the training script:
-   ```bash
-   python3 train.py --query_dir queries/job__base_query_split_1/train \
-                   --output_file train__bao__base_query_split_1.txt
-   ```
+1.  The main Docker environment for the evaluation suite must be built and running.
+2.  You have a Conda installation (e.g., [Miniconda](https://docs.conda.io/en/latest/miniconda.html)).
 
-## Testing guide
-
-1. Start the Bao server:
-   ```bash
-   cd bao_server && python3 main.py
-   ```
-
-2. In another terminal, configure the model checkpoint path in `test_run.py` (line 139):
-   ```python
-   FINAL_MODEL_DIR = "/your/path/here"  # Update this path to load your checkpoint
-   ```
-
-3. Run the testing script:
-   ```bash
-   python3 test_run.py \
-       /path/to/workload/experiment1/job/run1/ \
-       test_output.txt \
-       imdbload
-   ```
 ---
 
-![Bao loves PostgreSQL](https://github.com/LearnedSystems/BaoForPostgreSQL/blob/master/branding/bao_loves_pg.svg)
+## 1. Environment Setup
 
-This is a prototype implementation of Bao for PostgreSQL. Bao is a learned query optimizer that learns to "steer" the PostgreSQL optimizer by issuing coarse-grained query hints. For more information about Bao, [check out the paper](https://rm.cab/bao).
+All BAO commands must be run from a dedicated Conda environment.
 
-Documentation, including a tutorial, is available here: https://rmarcus.info/bao_docs/
+1.  **Create and activate the Conda environment:**
+    ```bash
+    conda env create -f environment.yml
+    conda activate bao
+    ```
 
-While this repository contains working prototype implementations of many of the pieces required to build a production-ready learned query optimizer, this code itself should not be used in production in its current form. Notable limitations include:
+Your environment is now ready.
 
-* The reward function is currently restricted to being a user-supplied value or the query latency in wall time. Thus, results may be inconsistent with high degrees of parallelism.
-* The Bao server component does not perform any level of authentication or encryption. Do not run it on a machine directly accessible from an untrusted network.
-* The code has not been audited for security issues. Since the PostgreSQL integration is written using the C hooks system, there are almost certainly issues.
+---
 
-This software is available under the AGPLv3 license. 
+## 2. Running BAO
 
-## FAQ
+Running BAO requires a two-step process in separate terminal sessions: first, you start the BAO server, and second, you run the training or testing script which acts as a client.
 
-### Bao seems to take a long time to optimize queries. Why is optimization time so high?**
+### Step A: Start the BAO Server
+In your first terminal, start the server. It will wait for connections from the client script.
+```bash
+cd bao_server
+python3 main.py
+```
 
-For simplicity, this prototype plans each hint (arm) sequentially. That means that if you are using 5 arms, Bao calls the PostgreSQL query planner 5 times per query. This work is in-theory embarrassingly parallel, but this prototype does not use parallelism.
+Keep this server running for the duration of your training or testing session.
 
-To compensate for this in a rough way, you can measure the maximum time it takes to plan any arm, then pretend that time is how long the entire planning process took (i.e., perfect parallelism). Obviously, this will underestimate the planning time. *If you want true measurements of Bao' planning time, you'll need to implement parallel planning.*
+### Step B: Run Training or Testing
 
-Note that parallel planning is not normally needed to get good performance. Each call to the planner typically takes 50-200ms. So if a query plan takes multiple minutes to execute, the additional time from planning will be inconsequential. However, *if you are optimizing shorter queries, this may not be the case.*
+In a second terminal, you will run the client scripts.
 
-For more information, see "Query optimization time" in Section 6.2 of the Bao paper.
+**Important Note**: The paths for saving and loading model checkpoints are **hardcoded** in the Python scripts. You must edit these files before running.
 
-### Bao isn't improving query performance for me, what's wrong?**
+#### General Training Command
+1. **Edit `train.py`**: Open `train.py` and modify the `model_dir` variable on line 39 to point to your desired output directory.
+```python 
+# in train.py
+model_dir = "/path/to/save/checkpoints/"
+```
 
-The two most common reasons for poor performance with Bao are:
+2. **Run the training script**
+```python
+python3 train.py --query_dir <path/to/train/queries/> \
+                --output_file <path/to/results.txt>
+```
+   - `--query_dir`: Path to the directory containing the training workload SQL files.
+   - `--output_file`: Path where the training logs and latencies will be saved.
 
-1. **Tuning the set of hints/arms used**. By default, this prototype uses 5 arms that we found to be optimal for a GCP N1-4 VM. Since the IMDb dataset is much smaller than the average analytics dataset, we intentionally choose a small VM. *If you test on different hardware, you need to choose a different set of arms.* The easiest way to select a good set of arms is with manual testing: run all of your queries with all possible arms, then pick the set of arms that has the potential to improve performance the most. See Section 6.3 of the Bao paper for more information.
+#### General Testing Command
+1. **Edit `test_run.py`**: Open test_run.py and modify the `FINAL_MODEL_DIR` variable on line 139 to point to the directory containing your pretrained model.
+```python 
+# in test_run.py
+FINAL_MODEL_DIR = "/path/to/load/checkpoints/"
+```
+   - `<path/to/test/queries/>`: (Positional) Path to the directory with test queries.
+   - <path/to/results.txt>: (Positional) Path to save the output results.
+   - <database_name>: (Positional) The name of the database to connect to (e.g., imdbload).
 
-2. **Training with too little data**. While we think Bao's neural network model is much more sample efficient than prior work (e.g., Neo), Bao is still relatively "data hungry." You will need to train on, at minimum, hundreds of query executions in order to get reasonable results. Note that since this prototype uses a sliding window based approach (Section 3.2 of the Bao paper), Bao will only retrain it's model every 25 queries. This means that if you execute 50 queries, the first 25 will be assigned the default optimizer plan, the second 25 will use the Bao model trained on the first 25 queries. *Thus, for the last query executed, you are evaluating Bao with 25, not 49, training examples*.
+---
 
-### How can I test Bao on my own training / test splits?
+### 3. Replicating Paper Experiments
 
-The core learning algorithm in Bao is a reinforcement learning based approach. The usual "training set" and "testing set" terminology do not typically apply: Bao is designed to continually learn from a stream of queries. In the paper, we describe this as "cross validation over time," where Bao makes a decision at time `t` based only on data from time `t-1`. This is technically true, but might not be the most intuitive way to think about how reinforcement learning works.
+For the exact commands, model paths, and setup needed to generate the results for each experiment (E1-E5) in our paper, refer to the detailed guide below.
 
-Since Bao is not magic, it cannot magically extrapolate to totally novel and unseen queries. As an extreme example, consider a database table with four tables `a`, `b`, `c`, and `d`. If Bao is "trained" on queries over `a` and `b`, and then "tested" on queries over `c` and `d`, performance will be poor! Bao takes advantage of the fact that all the queries issued up to time `t` *gives you information about the query at time `t+1`*. If you engineer a scenario where this is not the case, Bao will unsurprisingly fail.
+👉 [BAO Experiment Reproduction Commands](experiments.md)
 
-Thus, if you want to test Bao on your own workload, we suggest putting your queries into a random order and running Bao as intended. To increase robustness, you can measure performance across multiple random orderings. If you don't have enough queries in your workload, you can either (a) add noise to your queries to create new ones, or (b) "loop" the workload by repeating each query 1 to 3 times (note that if you repeat each query too many times, Bao might have the opportunity to test out every single hint!).
+---
 
-## Other work
+### 4. Reference from Original BAO Documentation
+<details>
+<summary><b>Click to expand for key concepts from the original BAO documentation.</b></summary>
+#### Core Concepts
 
-A non-exhaustive list of extensions and applications of Bao, both from us and from others:
+   - **Reinforcement Learning Approach**: BAO is designed as a reinforcement learning system that learns continuously from a stream of queries. Unlike supervised learning, the concepts of a fixed "training set" and "testing set" are less distinct. Performance at any given time depends on the queries it has seen previously. For robust evaluation, it's best to test on multiple random orderings of a workload.
 
-* Microsoft published two papers describing how they built a Bao-like system into the SCOPE analytics system: [paper 1](https://dl.acm.org/doi/10.1145/3448016.3457568) [paper 2](https://dl.acm.org/doi/10.1145/3514221.3526052)
-* Woltmann et al. published [FASTgres](https://dl.acm.org/doi/10.14778/3611479.3611528), which combines clustering and supervised learning to train hint selection models in an offline fashion.
-* Annesser et al. published [AutoSteer](https://dl.acm.org/doi/10.14778/3611540.3611544), which shows how Meta built a Bao-like system for their dashboarding analytics system.
-* Yi et al. published [LimeQO](https://doi.org/10.1145/3663742.3663974), which learns ideal hints for an entire query workload at once, in an offline fashion.
+   - **High Planning Time**: This prototype plans each potential hint (arm) sequentially. This means if you use 5 arms, BAO calls the PostgreSQL planner 5 times per query, increasing optimization overhead. This is less impactful for long-running queries but can be significant for shorter ones.
 
-Feel free to open PRs or contact us to add more!
+   - **Hint/Arm Tuning is Critical**: The default set of 5 arms was chosen for a specific hardware configuration. Performance on different hardware will likely require tuning this set of hints. The best way to do this is to manually test all possible arms on your workload and select the most promising subset.
+ 
+For more details, please refer to the complete [original_documentation.md](original_documentation.md) file.
+
+</details>
